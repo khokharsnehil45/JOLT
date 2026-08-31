@@ -1,0 +1,27 @@
+{
+  "order_id": "ORD-77491",
+  "customer": {
+    "full_name": "Marcus Vance",
+    "email": "marcus.vance92@gmail.com",
+    "phone": "+1-206-555-9182",
+    "address": {
+      "city": "Seattle",
+      "country": "United States"
+    }
+  },
+  "items": [
+    {
+      "product_name": "Ergonomic Desk Chair",
+      "quantity": 2,
+      "unit_price": 180.0
+    },
+    {
+      "product_name": "Wireless Mechanical Keyboard",
+      "quantity": 1,
+      "unit_price": 95.5
+    }
+  ],
+  "total_amount": 455.5,
+  "payment_status": "PAID",
+  "notes": "Special delivery instruction: Please leave the package behind the front porch gate if nobody answers the doorbell."
+}
