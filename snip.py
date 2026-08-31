@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-SNIP - Natural Language to Terminal Command Agent
+SNIP - Natural Language to Terminal Command Assistant & Conversational Agent
 Theme: Clean Minimalist Monochrome & Cyan Accents
 Features:
+- Natural language response explanation with friendly developer guidance
 - Translates natural language requests into exact bash/zsh commands
 - Explains flags and arguments clearly
 - Safety level warnings (Safe, Caution, High Risk)
@@ -131,7 +132,7 @@ def call_gemini(api_key: str, model: str, prompt: str, system_prompt: str) -> di
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "response_mime_type": "application/json",
-            "temperature": 0.0
+            "temperature": 0.1
         }
     }
     resp = requests.post(url, json=payload, timeout=60)
@@ -152,7 +153,7 @@ def call_openai_compatible(endpoint: str, api_key: str, model: str, prompt: str,
             {"role": "user", "content": prompt}
         ],
         "response_format": {"type": "json_object"},
-        "temperature": 0.0
+        "temperature": 0.1
     }
     resp = requests.post(endpoint, headers=headers, json=payload, timeout=60)
     if resp.status_code != 200:
@@ -172,7 +173,7 @@ def call_anthropic(api_key: str, model: str, prompt: str, system_prompt: str) ->
         "system": system_prompt + "\nReturn ONLY a pure valid JSON object.",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 2048,
-        "temperature": 0.0
+        "temperature": 0.1
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=60)
     if resp.status_code != 200:
@@ -187,7 +188,7 @@ def call_ollama(model: str, prompt: str, system_prompt: str) -> dict:
         "system": system_prompt,
         "format": "json",
         "stream": False,
-        "options": {"temperature": 0.0}
+        "options": {"temperature": 0.1}
     }
     resp = requests.post(OLLAMA_API_URL, json=payload, timeout=60)
     if resp.status_code != 200:
@@ -233,20 +234,24 @@ def generate_terminal_command(user_query: str, cfg: dict) -> dict:
     os_info = f"{sys.platform} (Linux/Unix)"
     current_cwd = os.getcwd()
     
-    system_prompt = f"""You are SNIP, an expert Linux/Unix terminal command generator.
+    system_prompt = f"""You are SNIP, an intelligent terminal companion and bash expert.
 The user's OS is: {os_info}. Current directory: {current_cwd}.
 
-Translate the user's plain-English request into the single most optimal, secure bash command.
+Your task:
+1. Provide a friendly, conversational natural language answer explaining the solution in 1-2 sentences.
+2. Provide the single most optimal, secure bash command.
+3. Provide a granular flag/argument breakdown.
+4. Assess safety level.
 
 Safety Levels:
-- "SAFE": Read-only, informational, or non-destructive (e.g. ls, find, grep, du, ps, curl).
+- "SAFE": Read-only or non-destructive (e.g. ls, find, grep, du, ps, curl, cat).
 - "CAUTION": Modifies files or restarts non-critical services (e.g. mv, cp, chmod, tar, docker restart).
 - "HIGH_RISK": Destructive actions, recursive deletion, partition changes, system halt (e.g. rm -rf, dd, mkfs, kill -9 1).
 
 Output format MUST be pure JSON with this exact structure:
 {{
+  "natural_response": "Conversational explanation answering what this command does and any helpful tips",
   "command": "the exact one-liner bash command",
-  "explanation": "Brief 1-sentence summary of what this command accomplishes",
   "breakdown": [
     {{"part": "grep -rn", "description": "Recursively searches with line numbers"}},
     {{"part": "'TODO'", "description": "Search pattern"}}
@@ -258,8 +263,8 @@ Output format MUST be pure JSON with this exact structure:
     return query_llm(f"User Request: {user_query}", system_prompt, cfg)
 
 def display_command_card(result: dict):
+    natural_res = result.get("natural_response", "").strip()
     cmd = result.get("command", "").strip()
-    explanation = result.get("explanation", "").strip()
     safety = result.get("safety_level", "SAFE").upper()
     warning = result.get("safety_warning")
     breakdown = result.get("breakdown", [])
@@ -274,19 +279,27 @@ def display_command_card(result: dict):
         safety_badge = "[bold white on green] ✔ SAFE [/]"
         border_color = "cyan"
 
+    # Natural Language Response Bubble
+    if natural_res:
+        console.print("\n")
+        console.print(Panel(
+            Text.from_markup(f"[bold cyan]SNIP:[/] [white]{natural_res}[/]"),
+            box=box.SIMPLE,
+            border_style="dim cyan"
+        ))
+
+    # Command Box
     syntax = Syntax(cmd, "bash", theme="monokai", word_wrap=True)
     panel = Panel(
         syntax,
         title=f"[bold white]Suggested Command[/]  {safety_badge}",
         title_align="left",
         border_style=border_color,
-        box=box.ROUNDED,
-        subtitle=f"[dim]{explanation}[/]",
-        subtitle_align="left"
+        box=box.ROUNDED
     )
-    console.print("\n")
     console.print(panel)
 
+    # Explanation Table
     if breakdown:
         table = Table(box=box.SIMPLE, show_header=True, header_style="bold dim white", expand=True)
         table.add_column("Argument / Flag", style="bold cyan", ratio=2)
@@ -452,7 +465,7 @@ def main():
         if not user_query or not user_query.strip():
             continue
 
-        with console.status("[dim cyan]Generating command with " + cfg.get("provider", "").upper() + "...[/]", spinner="dots"):
+        with console.status("[dim cyan]Generating response with " + cfg.get("provider", "").upper() + "...[/]", spinner="dots"):
             try:
                 result = generate_terminal_command(user_query.strip(), cfg)
             except Exception as e:
