@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-SNIP - Natural Language to Terminal Command Assistant & Conversational Agent
+SNIP - Natural Language to Terminal Command & Execution Intelligence Agent
 Theme: Clean Minimalist Monochrome & Cyan Accents
 Features:
-- Natural language response explanation with friendly developer guidance
-- Translates natural language requests into exact bash/zsh commands
-- Explains flags and arguments clearly
-- Safety level warnings (Safe, Caution, High Risk)
-- One-key execution with confirmation
+- Dual-Mode Intelligence:
+  1. Direct Answers & Executions: For questions like "how much disk space do I have?", it auto-runs safe inspection commands and delivers a direct, conversational natural language answer (e.g., "Available disk space: 142 GB (65% free on /)").
+  2. Command Proposals: For action requests (e.g., "compress these logs"), it generates the bash command, safety badge, breakdown, and one-key execution prompt.
 - Engine Switcher (Gemini, Groq, OpenAI, Claude, Local Ollama)
 """
 
@@ -40,7 +38,6 @@ BANNER_ART = r"""
 CONFIG_FILE = os.path.expanduser("~/.config/jolt/config.json")
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
 
-# Clean Minimalist Styling
 MINIMAL_STYLE = Style([
     ('qmark', 'fg:#5fd7ff bold'),
     ('question', 'fg:#ffffff bold'),
@@ -230,44 +227,80 @@ def query_llm(prompt: str, system_prompt: str, cfg: dict) -> dict:
     else:
         raise ValueError(f"Unknown provider '{provider}'")
 
-def generate_terminal_command(user_query: str, cfg: dict) -> dict:
+def run_command_capture(cmd: str) -> tuple[int, str]:
+    try:
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+        output = (res.stdout + "\n" + res.stderr).strip()
+        return res.returncode, output
+    except Exception as e:
+        return 1, str(e)
+
+def process_user_query(user_query: str, cfg: dict) -> dict:
     os_info = f"{sys.platform} (Linux/Unix)"
     current_cwd = os.getcwd()
     
+    # First pass: Determine intent (System query to execute immediately vs Action command)
     system_prompt = f"""You are SNIP, an intelligent terminal companion and bash expert.
 The user's OS is: {os_info}. Current directory: {current_cwd}.
 
-Your task:
-1. Provide a friendly, conversational natural language answer explaining the solution in 1-2 sentences.
-2. Provide the single most optimal, secure bash command.
-3. Provide a granular flag/argument breakdown.
-4. Assess safety level.
-
-Safety Levels:
-- "SAFE": Read-only or non-destructive (e.g. ls, find, grep, du, ps, curl, cat).
-- "CAUTION": Modifies files or restarts non-critical services (e.g. mv, cp, chmod, tar, docker restart).
-- "HIGH_RISK": Destructive actions, recursive deletion, partition changes, system halt (e.g. rm -rf, dd, mkfs, kill -9 1).
+Determine if the user is asking a direct question about their system status/metrics (e.g. "how much disk space available?", "what's my IP address?", "which port is node running on?", "what is my battery percentage?").
+If it is a status query, provide a safe, read-only bash command to inspect it.
 
 Output format MUST be pure JSON with this exact structure:
 {{
-  "natural_response": "Conversational explanation answering what this command does and any helpful tips",
+  "is_status_query": true | false,
   "command": "the exact one-liner bash command",
+  "explanation": "What this command does",
   "breakdown": [
-    {{"part": "grep -rn", "description": "Recursively searches with line numbers"}},
-    {{"part": "'TODO'", "description": "Search pattern"}}
+    {{"part": "df -h /", "description": "Displays human-readable disk space for root filesystem"}}
   ],
   "safety_level": "SAFE" | "CAUTION" | "HIGH_RISK",
-  "safety_warning": "Warning note if caution/high_risk, otherwise null"
+  "safety_warning": null
 }}"""
 
-    return query_llm(f"User Request: {user_query}", system_prompt, cfg)
+    first_pass = query_llm(f"User Request: {user_query}", system_prompt, cfg)
+    
+    # If it's a read-only status query, automatically execute the safe command and format the natural answer
+    if first_pass.get("is_status_query") and first_pass.get("safety_level") == "SAFE":
+        cmd_to_run = first_pass.get("command", "")
+        if cmd_to_run:
+            ret_code, stdout_res = run_command_capture(cmd_to_run)
+            
+            # Second pass: Synthesize the direct natural language answer with data
+            answer_sys_prompt = f"""You are SNIP. Convert the raw command output into a direct, friendly natural language response for the user.
+User Question: {user_query}
+Executed Command: {cmd_to_run}
+Raw Terminal Output:
+```
+{stdout_res}
+```
+
+Format as a concise, direct natural answer (e.g., "Available Disk Space: 142 GB (65% available on root partition /)" or "Your Local IP Address is 192.168.1.45").
+Output format MUST be pure JSON:
+{{
+  "natural_answer": "The direct natural answer with exact figures",
+  "raw_output": "{stdout_res[:300]}"
+}}"""
+            try:
+                answer_pass = query_llm("Summarize the answer", answer_sys_prompt, cfg)
+                first_pass["direct_answer"] = answer_pass.get("natural_answer", stdout_res)
+                first_pass["executed_output"] = stdout_res
+            except Exception:
+                first_pass["direct_answer"] = stdout_res
+
+    else:
+        # Generate conversational guidance for command actions
+        first_pass["direct_answer"] = f"Here is the command to {user_query.strip()}."
+
+    return first_pass
 
 def display_command_card(result: dict):
-    natural_res = result.get("natural_response", "").strip()
+    direct_ans = result.get("direct_answer", "").strip()
     cmd = result.get("command", "").strip()
     safety = result.get("safety_level", "SAFE").upper()
     warning = result.get("safety_warning")
     breakdown = result.get("breakdown", [])
+    executed_output = result.get("executed_output")
 
     if safety == "HIGH_RISK":
         safety_badge = "[bold white on red] ⚠ HIGH RISK [/]"
@@ -279,16 +312,28 @@ def display_command_card(result: dict):
         safety_badge = "[bold white on green] ✔ SAFE [/]"
         border_color = "cyan"
 
-    # Natural Language Response Bubble
-    if natural_res:
+    # Natural Language Direct Response
+    if direct_ans:
         console.print("\n")
         console.print(Panel(
-            Text.from_markup(f"[bold cyan]SNIP:[/] [white]{natural_res}[/]"),
-            box=box.SIMPLE,
-            border_style="dim cyan"
+            Text.from_markup(f"[bold cyan]SNIP:[/] [white]{direct_ans}[/]"),
+            box=box.ROUNDED,
+            border_style="cyan"
         ))
 
-    # Command Box
+    # If already executed automatically for status
+    if executed_output:
+        syntax_out = Syntax(executed_output, "bash", theme="monokai", word_wrap=True)
+        console.print(Panel(
+            syntax_out,
+            title=f"[dim]Terminal Output ({cmd})[/]",
+            title_align="left",
+            border_style="dim cyan",
+            box=box.SIMPLE
+        ))
+        return
+
+    # Action Command Box
     syntax = Syntax(cmd, "bash", theme="monokai", word_wrap=True)
     panel = Panel(
         syntax,
@@ -401,13 +446,13 @@ def main():
 
     model_label = f"{cfg.get('provider', 'gemini').upper()} ({cfg.get('model', 'gemini-2.5-flash')})"
 
-    # Direct query argument: `snip find all png files over 5mb`
+    # Direct query argument: `snip how much disk space available`
     if args:
         user_query = " ".join(args)
         print_header(model_label)
-        with console.status("[dim cyan]Generating command...[/]", spinner="dots"):
+        with console.status("[dim cyan]Processing query...[/]", spinner="dots"):
             try:
-                result = generate_terminal_command(user_query, cfg)
+                result = process_user_query(user_query, cfg)
             except Exception as e:
                 console.print(f"[bold red]✖ Error:[/] {e}")
                 sys.exit(1)
@@ -415,7 +460,7 @@ def main():
         display_command_card(result)
         
         cmd = result.get("command", "")
-        if cmd:
+        if cmd and not result.get("executed_output"):
             action = questionary.select(
                 "Action:",
                 choices=[
@@ -442,7 +487,7 @@ def main():
         action = questionary.select(
             "Select action:",
             choices=[
-                "💬 Ask a Terminal Command",
+                "💬 Ask a Question or Command",
                 "⚙ Switch AI Engine (Gemini, Groq, OpenAI, Claude, Ollama)",
                 "❌ Exit"
             ],
@@ -458,16 +503,16 @@ def main():
             continue
 
         user_query = questionary.text(
-            "What would you like to do? (e.g. 'find all files modified in 24h'):",
+            "What would you like to do or know? (e.g. 'how much disk space is free?'):",
             style=MINIMAL_STYLE
         ).ask()
 
         if not user_query or not user_query.strip():
             continue
 
-        with console.status("[dim cyan]Generating response with " + cfg.get("provider", "").upper() + "...[/]", spinner="dots"):
+        with console.status("[dim cyan]Thinking with " + cfg.get("provider", "").upper() + "...[/]", spinner="dots"):
             try:
-                result = generate_terminal_command(user_query.strip(), cfg)
+                result = process_user_query(user_query.strip(), cfg)
             except Exception as e:
                 console.print(f"\n[bold red]✖ Error:[/] {e}\n")
                 input("Press Enter to continue...")
@@ -476,13 +521,13 @@ def main():
         display_command_card(result)
         
         cmd = result.get("command", "")
-        if cmd:
+        if cmd and not result.get("executed_output"):
             sub_action = questionary.select(
                 "Action:",
                 choices=[
                     "▶ Run Command Now",
                     "📋 Copy to Clipboard",
-                    "🔄 Ask Another Command",
+                    "🔄 Ask Another Query",
                     "❌ Exit"
                 ],
                 style=MINIMAL_STYLE
@@ -497,6 +542,8 @@ def main():
                 time.sleep(1)
             elif sub_action and "Exit" in sub_action:
                 break
+        else:
+            input("\n[dim]Press Enter to continue...[/]")
 
 if __name__ == "__main__":
     main()
